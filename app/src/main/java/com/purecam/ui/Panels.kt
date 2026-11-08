@@ -423,7 +423,7 @@ fun SettingsDialog(vm: CameraViewModel, ui: UiState) {
                 ChoiceRow("Sharpening", listOf(Processing.OFF, Processing.FAST, Processing.HIGH_QUALITY), s.sharpening, { it.label }) { p ->
                     vm.updateSettings { it.copy(sharpening = p) }
                 }
-                SwitchRow("Keep unfiltered original", s.keepOriginal, subtitle = "With a filter on, also save the untouched camera JPEG") {
+                SwitchRow("Keep unfiltered original", s.keepOriginal, subtitle = "Off: one file per photo. On: with a filter, also save an unfiltered copy") {
                     vm.updateSettings { it.copy(keepOriginal = !it.keepOriginal) }
                 }
                 SwitchRow("Mirror front-camera photos", s.mirrorFront) { vm.updateSettings { it.copy(mirrorFront = !it.mirrorFront) } }

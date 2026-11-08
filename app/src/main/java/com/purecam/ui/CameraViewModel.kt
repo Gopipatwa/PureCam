@@ -935,10 +935,17 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
         if (filtered || crop != null || mirror) {
             if (filtered && s.keepOriginal) {
-                val ext = if (shot.heic) "heic" else "jpg"
-                MediaStoreSaver.saveImage(resolver, "${base}_ORIGINAL.$ext", if (shot.heic) "image/heic" else "image/jpeg", time) {
-                    it.write(shot.jpeg)
+                // The extra unfiltered copy uses the same format as the main photo.
+                var orig = shot.jpeg
+                var origHeic = shot.heic
+                if (s.photoFormat == PhotoFormat.HEIC && !origHeic && liveDeferred == null) {
+                    HeicCodec.fromJpeg(orig, s.jpegQuality, cache)?.let { orig = it; origHeic = true }
                 }
+                val o = orig
+                MediaStoreSaver.saveImage(
+                    resolver, "${base}_ORIGINAL." + (if (origHeic) "heic" else "jpg"),
+                    if (origHeic) "image/heic" else "image/jpeg", time,
+                ) { it.write(o) }
             }
             if (shot.heic) jpeg = HeicCodec.toJpeg(jpeg, 100, cache)
             isHeic = false

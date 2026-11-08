@@ -63,7 +63,7 @@ data class AppSettings(
     val jpegQuality: Int = 100,
     val noiseReduction: Processing = Processing.OFF,
     val sharpening: Processing = Processing.OFF,
-    val keepOriginal: Boolean = true,
+    val keepOriginal: Boolean = false,
     val mirrorFront: Boolean = false,
     val liveSaveVideo: Boolean = false,
     val videoResolution: VideoResolution = VideoResolution.UHD,
@@ -102,7 +102,7 @@ class SettingsStore(context: Context) {
             jpegQuality = p.getInt("jpegQuality", d.jpegQuality),
             noiseReduction = enumOr(p.getString("nr", null), d.noiseReduction),
             sharpening = enumOr(p.getString("edge", null), d.sharpening),
-            keepOriginal = p.getBoolean("keepOriginal", d.keepOriginal),
+            keepOriginal = p.getBoolean("keepOriginalV2", d.keepOriginal),
             mirrorFront = p.getBoolean("mirrorFront", d.mirrorFront),
             liveSaveVideo = p.getBoolean("liveSaveVideo", d.liveSaveVideo),
             videoResolution = enumOr(p.getString("videoRes", null), d.videoResolution),
@@ -137,7 +137,7 @@ class SettingsStore(context: Context) {
             .putInt("jpegQuality", s.jpegQuality)
             .putString("nr", s.noiseReduction.name)
             .putString("edge", s.sharpening.name)
-            .putBoolean("keepOriginal", s.keepOriginal)
+            .putBoolean("keepOriginalV2", s.keepOriginal)
             .putBoolean("mirrorFront", s.mirrorFront)
             .putBoolean("liveSaveVideo", s.liveSaveVideo)
             .putString("videoRes", s.videoResolution.name)
