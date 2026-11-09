@@ -33,6 +33,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -137,7 +138,10 @@ import com.purecam.model.VideoKind
 import com.purecam.model.VideoResolution
 import com.purecam.util.OrientationTracker
 import kotlinx.coroutines.flow.StateFlow
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -328,6 +332,13 @@ private fun Viewfinder(vm: CameraViewModel, ui: UiState, rot: Float, quarter: In
         GridOverlay(s.grid)
         if (s.level) LevelOverlay(vm.orientation, quarter)
         ui.focusPoint?.let { FocusRing(it, ui.aeAfLocked, vm.stats) }
+        AnimatedVisibility(
+            ui.showBrightness && ui.mode != CameraMode.PRO && ui.caps.evRange.upper > ui.caps.evRange.lower,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(350)),
+        ) {
+            ExposureSlider(vm, ui)
+        }
         if (ui.mode == CameraMode.PRO && s.histogram) {
             Histogram(vm.histogram, Modifier.align(Alignment.TopStart).padding(12.dp))
         }
@@ -366,18 +377,15 @@ private fun Viewfinder(vm: CameraViewModel, ui: UiState, rot: Float, quarter: In
 
 @Composable
 private fun androidx.compose.foundation.layout.BoxScope.PortraitChrome(vm: CameraViewModel, ui: UiState, rot: Float) {
-    Row(
+    // keep the status bar readable over bright scenes
+    Box(
         Modifier
             .align(Alignment.TopCenter)
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(CamColors.Scrim.copy(alpha = 0.7f), Color.Transparent)))
+            .background(Brush.verticalGradient(listOf(CamColors.Scrim.copy(alpha = 0.6f), Color.Transparent)))
             .statusBarsPadding()
-            .padding(horizontal = 4.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TopBarItems(vm, ui, rot)
-    }
+            .height(12.dp),
+    )
     Column(
         Modifier
             .align(Alignment.BottomCenter)
@@ -390,6 +398,13 @@ private fun androidx.compose.foundation.layout.BoxScope.PortraitChrome(vm: Camer
         PanelArea(vm, ui, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
         AnimatedVisibility(ui.showZoomSlider, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
             ZoomSlider(vm, ui, Modifier.fillMaxWidth().padding(horizontal = 24.dp))
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TopBarItems(vm, ui, rot)
         }
         LensChips(vm, ui, rot, vertical = false)
         AnimatedVisibility(ui.mode == CameraMode.VIDEO && !ui.recording, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
@@ -473,11 +488,9 @@ private fun androidx.compose.foundation.layout.BoxScope.LandscapeChrome(vm: Came
 
 @Composable
 private fun PanelArea(vm: CameraViewModel, ui: UiState, modifier: Modifier) {
-    val evAdjustable = ui.caps.evRange.upper > ui.caps.evRange.lower
     val panel = when {
         ui.showFilters -> 1
         ui.mode == CameraMode.PRO -> 2
-        ui.showBrightness || (ui.focusPoint != null && evAdjustable && ui.mode != CameraMode.PRO) -> 3
         else -> 0
     }
     // remember the last panel so it can animate out
@@ -498,8 +511,7 @@ private fun PanelArea(vm: CameraViewModel, ui: UiState, modifier: Modifier) {
                 Box(Modifier.padding(vertical = 8.dp)) {
                     when (kind) {
                         1 -> FilterStrip(vm, ui)
-                        2 -> ProPanel(vm, ui)
-                        else -> BrightnessSlider(vm, ui)
+                        else -> ProPanel(vm, ui)
                     }
                 }
             }
@@ -508,6 +520,80 @@ private fun PanelArea(vm: CameraViewModel, ui: UiState, modifier: Modifier) {
 }
 
 // ---------------------------------------------------------------------------- overlays
+
+/** Slim vertical exposure slider with a sun thumb, like other phone cameras. Drag up = brighter. */
+@Composable
+private fun ExposureSlider(vm: CameraViewModel, ui: UiState) {
+    val r = ui.caps.evRange
+    val lo = r.lower.toFloat()
+    val hi = r.upper.toFloat()
+    val span = (hi - lo).coerceAtLeast(1f)
+    val view = LocalView.current
+    val accent = MaterialTheme.colorScheme.primary
+    var evF by remember { mutableFloatStateOf(ui.ev.toFloat()) }
+    LaunchedEffect(ui.ev) { if (ui.ev != evF.roundToInt()) evF = ui.ev.toFloat() }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val fp = ui.focusPoint
+        val fx = fp?.x ?: 0.5f
+        val fy = fp?.y ?: 0.5f
+        val track = 132.dp
+        val w = 40.dp
+        val cx = maxWidth * fx
+        val x = (if (fx < 0.78f) cx + 42.dp else cx - 42.dp - w).coerceIn(0.dp, maxWidth - w)
+        val y = (maxHeight * fy - track / 2).coerceIn(0.dp, maxHeight - track)
+        Box(
+            Modifier
+                .offset(x, y)
+                .size(w, track)
+                .pointerInput(lo, hi) {
+                    detectVerticalDragGestures(onDragStart = { vm.pokeBrightness() }) { change, dy ->
+                        change.consume()
+                        val old = evF.roundToInt()
+                        evF = (evF - dy / size.height * span).coerceIn(lo, hi)
+                        val now = evF.roundToInt()
+                        if (now != old) {
+                            view.haptic(HapticFeedbackConstants.CLOCK_TICK)
+                            vm.setEv(now)
+                        } else {
+                            vm.pokeBrightness()
+                        }
+                    }
+                },
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val frac = (evF - lo) / span
+                val ty = size.height * (1f - frac)
+                val mx = size.width / 2
+                val gap = 15.dp.toPx()
+                val line = 1.2.dp.toPx()
+                val c = CamColors.OnScrim.copy(alpha = 0.7f)
+                if (ty - gap > 0f) drawLine(c, Offset(mx, 0f), Offset(mx, ty - gap), line)
+                if (ty + gap < size.height) drawLine(c, Offset(mx, ty + gap), Offset(mx, size.height), line)
+                drawCircle(accent, radius = 4.5.dp.toPx(), center = Offset(mx, ty))
+                val r1 = 7.5.dp.toPx()
+                val r2 = 10.5.dp.toPx()
+                for (k in 0 until 8) {
+                    val a = k * PI / 4
+                    drawLine(
+                        accent,
+                        Offset(mx + (cos(a) * r1).toFloat(), ty + (sin(a) * r1).toFloat()),
+                        Offset(mx + (cos(a) * r2).toFloat(), ty + (sin(a) * r2).toFloat()),
+                        1.5.dp.toPx(),
+                    )
+                }
+            }
+        }
+        if (ui.ev != 0) {
+            Text(
+                Fmt.ev(ui.ev, ui.caps.evStep),
+                Modifier.offset(x, (y + track).coerceAtMost(maxHeight - 16.dp)).width(w),
+                color = accent,
+                style = MaterialTheme.typography.labelSmall,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
 
 @Composable
 private fun rememberIconRotation(rotation: Int): Float {

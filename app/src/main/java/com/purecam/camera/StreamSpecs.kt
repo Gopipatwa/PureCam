@@ -42,6 +42,8 @@ data class CameraCaps(
     val manualSensor: Boolean = false,
     val manualWb: Boolean = false,
     val maxRes: Boolean = false,
+    /** Camera can apply a custom tone curve (used for the colour profiles). */
+    val toneCurve: Boolean = false,
     val hardwareLevel: String = "",
 ) {
     companion object {
@@ -70,6 +72,9 @@ data class CameraCaps(
                 manualSensor = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR),
                 manualWb = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING),
                 maxRes = StreamSpecs.supportsMaxRes(lens),
+                toneCurve = (ch.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES) ?: intArrayOf())
+                    .contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE) &&
+                    (ch.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0) >= 16,
                 hardwareLevel = level,
             )
         }
@@ -113,7 +118,7 @@ object StreamSpecs {
             .take(10)
     }
 
-    fun previewSize(lens: Lens, aspect: Float, maxW: Int = 1920, maxH: Int = 1440): Size {
+    fun previewSize(lens: Lens, aspect: Float, maxW: Int = 1440, maxH: Int = 1440): Size {
         val sizes = map(lens)?.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
         return sizes.filter { it.width <= maxW && it.height <= maxH && matches(it, aspect) }.maxByOrNull { area(it) }
             ?: sizes.filter { it.width <= maxW && it.height <= maxH }

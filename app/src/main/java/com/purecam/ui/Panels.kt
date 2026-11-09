@@ -75,6 +75,7 @@ import com.purecam.gl.GlRenderer
 import com.purecam.model.CameraMode
 import com.purecam.model.GridType
 import com.purecam.model.PhotoFormat
+import com.purecam.model.ColorProfile
 import com.purecam.model.Processing
 import com.purecam.model.VideoCodec
 import com.purecam.model.VideoKind
@@ -410,6 +411,13 @@ fun SettingsDialog(vm: CameraViewModel, ui: UiState) {
                     enabled = ui.caps.raw,
                     subtitle = if (ui.caps.raw) "Unprocessed sensor data for Lightroom / Snapseed" else "Not offered by this lens",
                 ) { vm.toggleRaw() }
+                ChoiceRow("Colour profile", ColorProfile.entries.toList(), s.colorProfile, { it.label }) { c ->
+                    vm.updateSettings { it.copy(colorProfile = c) }
+                }
+                InfoText(
+                    "A fixed contrast curve applied by the camera's own tone-mapping hardware (no AI). " +
+                        "Natural is the camera's untouched output.",
+                )
                 ChoiceRow("Photo format", PhotoFormat.entries.toList(), s.photoFormat, { it.label }) { f ->
                     vm.updateSettings(reopenCamera = true) { it.copy(photoFormat = f) }
                 }

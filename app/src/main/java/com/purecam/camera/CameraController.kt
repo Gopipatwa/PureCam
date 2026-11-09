@@ -20,6 +20,7 @@ import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
+import android.hardware.camera2.params.TonemapCurve
 import android.location.Location
 import android.media.Image
 import android.media.ImageReader
@@ -79,6 +80,8 @@ data class ControlState(
     val noiseReduction: Processing = Processing.OFF,
     val sharpening: Processing = Processing.OFF,
     val stabilization: Boolean = true,
+    /** S-curve strength for the colour profile (0 = camera default tonemap). */
+    val toneCurve: Float = 0f,
 )
 
 class SessionSpec(
@@ -583,6 +586,16 @@ class CameraController(context: Context) {
         val edgeModes = ch.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: intArrayOf()
         pickEdge(c.sharpening, still, edgeModes)?.let { b.set(CaptureRequest.EDGE_MODE, it) }
 
+        // Colour profile: our S-curve on top of the sRGB gamma, applied by the ISP's tonemap block.
+        val tmModes = ch.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES) ?: intArrayOf()
+        if (c.toneCurve > 0f && tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)) {
+            val pts = ch.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 32
+            b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
+            b.set(CaptureRequest.TONEMAP_CURVE, toneCurve(c.toneCurve, minOf(pts, 64)))
+        } else if (still && tmModes.contains(CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)) {
+            b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)
+        }
+
         // Stabilisation: OIS is pure optics, always on when present. EIS only for video and only if enabled.
         val ois = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
         if (ois.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)) {
@@ -782,6 +795,23 @@ class CameraController(context: Context) {
                 270 -> PointF(1f - v, x)
                 else -> PointF(x, v)
             }
+        }
+
+        private val curveCache = HashMap<Pair<Float, Int>, TonemapCurve>()
+
+        /** sRGB gamma followed by a smoothstep S-curve of [strength]; same curve for R, G and B. */
+        fun toneCurve(strength: Float, points: Int): TonemapCurve = curveCache.getOrPut(strength to points) {
+            val n = points.coerceIn(2, 64)
+            val a = FloatArray(n * 2)
+            for (i in 0 until n) {
+                val t = i / (n - 1f)
+                val x = t * t // denser points in the shadows
+                val g = if (x <= 0.0031308f) 12.92f * x else (1.055 * Math.pow(x.toDouble(), 1 / 2.4) - 0.055).toFloat()
+                val sc = g * g * (3 - 2 * g)
+                a[i * 2] = x
+                a[i * 2 + 1] = (g + strength * (sc - g)).coerceIn(0f, 1f)
+            }
+            TonemapCurve(a, a.copyOf(), a.copyOf())
         }
 
         /** Approximate white-balance gains that neutralise a black-body illuminant of [kelvin]. */

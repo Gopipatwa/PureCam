@@ -33,6 +33,9 @@ class FilterProgram(private val external: Boolean) {
     private val uResolution = loc("uResolution")
     private val uTime = loc("uTime")
     private val uPeaking = loc("uPeaking")
+    private val uBaseCurve = loc("uBaseCurve")
+    private val uBaseSat = loc("uBaseSat")
+    private val uFast = loc("uFast")
 
     private val quad = GlUtil.floatBuffer(
         floatArrayOf(
@@ -59,6 +62,11 @@ class FilterProgram(private val external: Boolean) {
         var peaking: Boolean = false,
         /** Quarter turns to counter-rotate for the display (landscape UI). */
         var rotation: Int = 0,
+        /** Colour-profile fallback when the camera can't apply a tone curve itself. */
+        var baseCurve: Float = 0f,
+        var baseSat: Float = 1f,
+        /** Skip all filter maths (Original filter, no peaking): far less GPU work per frame. */
+        var fast: Boolean = false,
     )
 
     fun draw(texture: Int, texMatrix: FloatArray, p: FilterParams, intensity: Float, a: DrawArgs) {
@@ -89,6 +97,9 @@ class FilterProgram(private val external: Boolean) {
         GLES20.glUniform2f(uResolution, a.outW.toFloat(), a.outH.toFloat())
         GLES20.glUniform1f(uTime, a.time)
         GLES20.glUniform1f(uPeaking, if (a.peaking) 1f else 0f)
+        GLES20.glUniform1f(uBaseCurve, a.baseCurve)
+        GLES20.glUniform1f(uBaseSat, a.baseSat)
+        GLES20.glUniform1f(uFast, if (a.fast) 1f else 0f)
 
         quad.position(0)
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, quad)
@@ -165,6 +176,9 @@ uniform vec2 uTexel;
 uniform vec2 uResolution;
 uniform float uTime;
 uniform float uPeaking;
+uniform float uBaseCurve;
+uniform float uBaseSat;
+uniform float uFast;
 
 vec3 src(vec2 c) {
     return texture2D(uTex, (uTexMatrix * vec4(c, 0.0, 1.0)).xy).rgb;
@@ -196,6 +210,15 @@ float edge(vec2 c) {
 
 void main() {
     vec3 orig = src(vTex);
+    if (uBaseCurve > 0.0 || uBaseSat != 1.0) {
+        vec3 oc = clamp(orig, 0.0, 1.0);
+        orig = mix(oc, oc * oc * (3.0 - 2.0 * oc), uBaseCurve);
+        orig = clamp(mix(vec3(luma(orig)), orig, uBaseSat), 0.0, 1.0);
+    }
+    if (uFast > 0.5) {
+        gl_FragColor = vec4(orig, 1.0);
+        return;
+    }
     vec3 c = orig;
     if (uMode > 0.5 && uMode < 1.5) {
         float e = edge(vTex);

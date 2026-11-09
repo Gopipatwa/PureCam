@@ -46,6 +46,11 @@ class GlRenderer {
     @Volatile var lastFrameTimestampNs: Long = 0L
         private set
     @Volatile var histogramListener: ((IntArray) -> Unit)? = null
+    /** Histogram read-back stalls the GPU, so it only runs while the histogram is on screen. */
+    @Volatile var histogramEnabled: Boolean = false
+    /** Colour-profile fallback (only when the camera can't apply a tone curve itself). */
+    @Volatile var baseCurve: Float = 0f
+    @Volatile var baseSat: Float = 1f
     /** Display rotation in quarter turns (Surface.ROTATION_*), applied to the viewfinder only. */
     @Volatile var displayRotation: Int = 0
 
@@ -244,9 +249,9 @@ class GlRenderer {
         val k = intensity
 
         if (d != null) {
-            drawDisplay(d, withHistogram = histogramListener != null && frame % 5 == 0L)
+            drawDisplay(d, withHistogram = histogramEnabled && histogramListener != null && frame % 6 == 0L)
             val tf = thumbnailFilters
-            if (tf != null && tf.isNotEmpty() && thumbnailListener != null && frame % 4 == 2L) thumbnails(tf, cw, ch)
+            if (tf != null && tf.isNotEmpty() && thumbnailListener != null && frame % 6 == 3L) thumbnails(tf, cw, ch)
             egl.swap(d.egl)
         }
         for (t in encoders.values) {
@@ -276,6 +281,9 @@ class GlRenderer {
         args.texelY = 1f / ch
         args.time = (frame % 997).toFloat()
         args.peaking = peak
+        args.baseCurve = baseCurve
+        args.baseSat = baseSat
+        args.fast = !peak && (k <= 0.001f || p === FilterParams.NONE)
         program.draw(oesTex, texMatrix, p, k, args)
     }
 
@@ -331,6 +339,9 @@ class GlRenderer {
             texelX = 1f / cw,
             texelY = 1f / ch,
             time = 3f,
+            baseCurve = baseCurve,
+            baseSat = baseSat,
+            fast = intensity <= 0.001f || params === FilterParams.NONE,
         )
         program.draw(oesTex, texMatrix, params, intensity, a)
         val buf = ByteBuffer.allocateDirect(w * h * 4).order(ByteOrder.nativeOrder())
@@ -365,6 +376,9 @@ class GlRenderer {
             args.outW = THUMB; args.outH = THUMB
             args.texelX = 1f / cw; args.texelY = 1f / ch
             args.peaking = false
+            args.baseCurve = baseCurve
+            args.baseSat = baseSat
+            args.fast = list[i] === FilterParams.NONE
             program.draw(oesTex, texMatrix, list[i], 1f, args)
         }
         val buf = thumbBuf!!
@@ -379,7 +393,8 @@ class GlRenderer {
     }
 
     companion object {
-        const val THUMB = 120
+        /** Filter tiles are tiny on screen; 64 px keeps the read-back cheap. */
+        const val THUMB = 64
         private const val TAG = "GlRenderer"
         private const val HIST_W = 96
         private const val HIST_H = 96

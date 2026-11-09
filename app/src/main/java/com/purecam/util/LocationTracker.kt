@@ -35,7 +35,7 @@ class LocationTracker(private val context: Context) {
         }.filter { p -> runCatching { lm.allProviders.contains(p) && lm.isProviderEnabled(p) }.getOrDefault(false) }
         for (p in providers) {
             runCatching { lm.getLastKnownLocation(p) }.getOrNull()?.let { consider(it) }
-            runCatching { lm.requestLocationUpdates(p, 3000L, 5f, listener, Looper.getMainLooper()) }
+            runCatching { lm.requestLocationUpdates(p, 15_000L, 15f, listener, Looper.getMainLooper()) }
         }
     }
 

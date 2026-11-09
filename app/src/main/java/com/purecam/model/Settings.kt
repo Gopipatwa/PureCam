@@ -35,6 +35,16 @@ enum class VideoCodec(val label: String, val mime: String) {
     HEVC("H.265 (HEVC)", MediaFormat.MIMETYPE_VIDEO_HEVC)
 }
 
+/**
+ * Deterministic tone curve on top of the camera's output (no AI): the camera's own tonemap hardware
+ * applies it, so it costs nothing and photos stay the camera's original JPEG.
+ */
+enum class ColorProfile(val label: String, val curve: Float, val saturation: Float) {
+    NATURAL("Natural (untouched)", 0f, 1f),
+    STANDARD("Standard", 0.38f, 1.08f),
+    VIVID("Vivid", 0.62f, 1.2f),
+}
+
 enum class PhotoFormat(val label: String) { JPEG("JPEG"), HEIC("HEIC (about half the size)") }
 
 enum class VideoKind(val label: String) { NORMAL("Normal"), SLOW_MO("Slow motion"), TIMELAPSE("Time-lapse") }
@@ -81,6 +91,7 @@ data class AppSettings(
     val filterIntensity: Float = 1f,
     val geotag: Boolean = false,
     val photoFormat: PhotoFormat = PhotoFormat.JPEG,
+    val colorProfile: ColorProfile = ColorProfile.STANDARD,
     val videoKind: VideoKind = VideoKind.NORMAL,
     val slowMoFps: Int = 240,
     val timelapseSpeed: Int = 10,
@@ -120,6 +131,7 @@ class SettingsStore(context: Context) {
             filterIntensity = p.getFloat("filterIntensity", d.filterIntensity),
             geotag = p.getBoolean("geotag", d.geotag),
             photoFormat = enumOr(p.getString("photoFormat", null), d.photoFormat),
+            colorProfile = enumOr(p.getString("colorProfile", null), d.colorProfile),
             videoKind = enumOr(p.getString("videoKind", null), d.videoKind),
             slowMoFps = p.getInt("slowMoFps", d.slowMoFps),
             timelapseSpeed = p.getInt("timelapseSpeed", d.timelapseSpeed),
@@ -155,6 +167,7 @@ class SettingsStore(context: Context) {
             .putFloat("filterIntensity", s.filterIntensity)
             .putBoolean("geotag", s.geotag)
             .putString("photoFormat", s.photoFormat.name)
+            .putString("colorProfile", s.colorProfile.name)
             .putString("videoKind", s.videoKind.name)
             .putInt("slowMoFps", s.slowMoFps)
             .putInt("timelapseSpeed", s.timelapseSpeed)

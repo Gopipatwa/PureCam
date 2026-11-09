@@ -12,8 +12,8 @@ android {
         applicationId = "com.purecam"
         minSdk = 30          // Android 11+ (Redmi Note 13 Pro+ ships with Android 13)
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "1.4"
     }
 
     buildTypes {

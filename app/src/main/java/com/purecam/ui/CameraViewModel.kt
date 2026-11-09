@@ -48,6 +48,7 @@ import com.purecam.media.VideoRecorder
 import com.purecam.model.AppSettings
 import com.purecam.model.AspectRatio
 import com.purecam.model.CameraMode
+import com.purecam.model.ColorProfile
 import com.purecam.model.FlashMode
 import com.purecam.model.PhotoFormat
 import com.purecam.model.SettingsStore
@@ -55,6 +56,7 @@ import com.purecam.model.VideoCodec
 import com.purecam.model.VideoKind
 import com.purecam.model.VolumeKeyAction
 import com.purecam.model.WbPreset
+import com.purecam.util.DngCrop
 import com.purecam.util.Exif
 import com.purecam.util.LocationTracker
 import com.purecam.util.OrientationTracker
@@ -171,6 +173,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private var pausedTotalMs = 0L
     private var pausedAt = 0L
     private var heicLimitShown = false
+    private var brightnessJob: Job? = null
 
     init {
         sound.load(MediaActionSound.SHUTTER_CLICK)
@@ -426,6 +429,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             noiseReduction = st.settings.noiseReduction,
             sharpening = st.settings.sharpening,
             stabilization = st.settings.stabilization,
+            toneCurve = if (st.caps.toneCurve) st.settings.colorProfile.curve else 0f,
         )
     }
 
@@ -450,12 +454,19 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         syncRenderer()
     }
 
+    /** Lenses without tone-curve support get the colour profile from the GPU instead. */
+    private fun profileViaGl(st: UiState) = st.settings.colorProfile != ColorProfile.NATURAL && !st.caps.toneCurve
+
     private fun syncRenderer() {
         val st = _ui.value
         val f = Filters.byId(st.settings.filterId)
         renderer.params = f.params
         renderer.intensity = if (f.id == Filters.ORIGINAL) 0f else st.settings.filterIntensity
         renderer.peaking = st.mode == CameraMode.PRO && st.focus != null && st.settings.focusPeaking
+        renderer.histogramEnabled = st.mode == CameraMode.PRO && st.settings.histogram
+        val viaGl = profileViaGl(st)
+        renderer.baseCurve = if (viaGl) st.settings.colorProfile.curve else 0f
+        renderer.baseSat = if (viaGl) st.settings.colorProfile.saturation else 1f
     }
 
     // ------------------------------------------------------------------ Live Photo
@@ -666,7 +677,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun onTap(x: Float, y: Float) {
         val st = _ui.value
         if (!st.cameraReady) return
-        _ui.update { it.copy(focusPoint = FocusPoint(x, y, ++focusIds), aeAfLocked = false) }
+        val evOk = st.caps.evRange.upper > st.caps.evRange.lower && st.mode != CameraMode.PRO
+        _ui.update { it.copy(focusPoint = FocusPoint(x, y, ++focusIds), aeAfLocked = false, showBrightness = evOk, showFilters = false) }
+        renderer.thumbnailFilters = null
+        if (evOk) pokeBrightness()
         pushControls(refocus = true)
         focusResetJob?.cancel()
         focusResetJob = viewModelScope.launch {
@@ -691,7 +705,12 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         pushControls()
     }
 
-    fun setEv(ev: Int) { _ui.update { it.copy(ev = ev) }; pushControls() }
+    fun setEv(ev: Int) {
+        if (_ui.value.showBrightness) pokeBrightness()
+        if (ev == _ui.value.ev) return
+        _ui.update { it.copy(ev = ev) }
+        pushControls()
+    }
     fun setIso(iso: Int?) { _ui.update { it.copy(iso = iso) }; pushControls() }
     fun setShutter(ns: Long?) { _ui.update { it.copy(shutterNs = ns) }; pushControls() }
     fun setFocus(d: Float?) { _ui.update { it.copy(focus = d) }; pushControls() }
@@ -780,8 +799,19 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleBrightness() {
-        _ui.update { it.copy(showBrightness = !it.showBrightness, showFilters = false) }
+        val show = !_ui.value.showBrightness
+        _ui.update { it.copy(showBrightness = show, showFilters = false) }
         renderer.thumbnailFilters = null
+        if (show) pokeBrightness()
+    }
+
+    /** Keeps the exposure slider visible while it's being used; it fades out ~2 s after the last touch. */
+    fun pokeBrightness() {
+        brightnessJob?.cancel()
+        brightnessJob = viewModelScope.launch {
+            delay(BRIGHTNESS_HIDE_MS)
+            _ui.update { it.copy(showBrightness = false) }
+        }
     }
     fun showSettings(show: Boolean) = _ui.update { it.copy(showSettings = show) }
 
@@ -933,7 +963,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         var jpeg = shot.jpeg
         var isHeic = shot.heic
 
-        if (filtered || crop != null || mirror) {
+        val viaGl = profileViaGl(st)
+        if (filtered || crop != null || mirror || viaGl) {
             if (filtered && s.keepOriginal) {
                 // The extra unfiltered copy uses the same format as the main photo.
                 var orig = shot.jpeg
@@ -956,6 +987,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 mirror,
                 crop,
                 s.jpegQuality,
+                baseCurve = if (viaGl) s.colorProfile.curve else 0f,
+                baseSat = if (viaGl) s.colorProfile.saturation else 1f,
             )
         }
 
@@ -987,13 +1020,17 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val result = shot.result
         if (raw != null && result != null) {
             try {
-                MediaStoreSaver.saveImage(resolver, "$base.dng", "image/x-adobe-dng", time) { out ->
-                    DngCreator(shot.chars, result).use { dng ->
-                        dng.setOrientation(Exif.orientationFromDegrees(shot.jpegOrientation))
-                        currentLocation(st)?.let { dng.setLocation(it) }
-                        dng.writeImage(out, raw)
-                    }
+                val bos = java.io.ByteArrayOutputStream(raw.width * raw.height * 2 + 65536)
+                DngCreator(shot.chars, result).use { dng ->
+                    dng.setOrientation(Exif.orientationFromDegrees(shot.jpegOrientation))
+                    currentLocation(st)?.let { dng.setLocation(it) }
+                    dng.writeImage(bos, raw)
                 }
+                // RAW streams ignore zoom: frame the DNG like the JPEG (2x, 16:9, 1:1...).
+                val out = effectivePhoto(st)?.outSize
+                val aspect = if (out != null) maxOf(out.width, out.height).toFloat() / minOf(out.width, out.height) else 4f / 3f
+                val dngBytes = DngCrop.apply(bos.toByteArray(), st.zoom, aspect)
+                MediaStoreSaver.saveImage(resolver, "$base.dng", "image/x-adobe-dng", time) { it.write(dngBytes) }
             } catch (e: Exception) {
                 Log.e(TAG, "dng", e)
                 showMessage("RAW (DNG) save failed: ${e.message}")
@@ -1255,6 +1292,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         private const val VIDEO_KEY = "video"
         private const val MAX_BURST = 50
         private const val SCREEN_FLASH_SETTLE_MS = 650L
+        private const val BRIGHTNESS_HIDE_MS = 2200L
         private const val LIVE_MAX_SIDE = 1440
         private const val LIVE_BITRATE_HEVC = 4_000_000
         private const val LIVE_BITRATE_AVC = 6_000_000

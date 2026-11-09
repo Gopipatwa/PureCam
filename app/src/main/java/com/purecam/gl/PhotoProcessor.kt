@@ -53,6 +53,8 @@ class PhotoProcessor(private val cacheDir: File) {
         mirror: Boolean,
         cropAspect: Float?,
         quality: Int,
+        baseCurve: Float = 0f,
+        baseSat: Float = 1f,
     ): ByteArray = withContext(dispatcher) {
         val prog = ensureGl()
         val exif = ExifInterface(ByteArrayInputStream(jpeg))
@@ -104,6 +106,9 @@ class PhotoProcessor(private val cacheDir: File) {
             texelY = 1f / sh,
             time = 17f,
             peaking = false,
+            baseCurve = baseCurve,
+            baseSat = baseSat,
+            fast = intensity <= 0.001f || params === FilterParams.NONE,
         )
         prog.draw(inTex, GlUtil.IDENTITY, params, intensity, args)
         GLES20.glFinish()

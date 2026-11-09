@@ -46,7 +46,7 @@ class OrientationTracker(context: Context) : SensorEventListener {
 
     fun start() {
         if (listener.canDetectOrientation()) listener.enable()
-        accel?.let { sensors?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        accel?.let { sensors?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI, 100_000) }
     }
 
     fun stop() {
@@ -65,7 +65,10 @@ class OrientationTracker(context: Context) : SensorEventListener {
         var dev = ((tilt - rot) % 360f + 540f) % 360f - 180f
         if (dev > 90f) dev -= 180f
         if (dev < -90f) dev += 180f
-        _level.value = LevelState(horizon, dev, valid)
+        val cur = _level.value
+        if (valid != cur.valid || abs(horizon - cur.horizon) > 0.3f || abs(dev - cur.deviation) > 0.3f) {
+            _level.value = LevelState(horizon, dev, valid)
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
