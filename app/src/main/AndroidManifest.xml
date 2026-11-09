@@ -26,8 +26,7 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="fullSensor"
-            android:rotationAnimation="seamless"
+            android:screenOrientation="portrait"
             android:theme="@style/Theme.PureCam">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

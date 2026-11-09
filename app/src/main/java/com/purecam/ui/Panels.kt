@@ -401,6 +401,15 @@ fun SettingsDialog(vm: CameraViewModel, ui: UiState) {
                     .verticalScroll(rememberScrollState()),
             ) {
                 Section("Photo")
+                val soundForced = vm.shutterSoundForced
+                SwitchRow(
+                    "Shutter sound",
+                    s.shutterSound || soundForced,
+                    enabled = !soundForced,
+                    subtitle = if (soundForced) "Your phone's region requires the shutter sound, so it can't be turned off" else "Click when a photo is taken or a video starts / stops",
+                ) {
+                    vm.updateSettings { it.copy(shutterSound = !it.shutterSound) }
+                }
                 if (ui.photoOptions.isNotEmpty()) {
                     ChoiceRow("Resolution (${ui.lens?.label ?: ""})", ui.photoOptions, ui.photoSize, { it.label }) { vm.selectPhotoSize(it) }
                     if (s.live) InfoText("Live Photos are captured at ~12 MP to keep files small; your choice applies to normal shots.")
@@ -415,8 +424,8 @@ fun SettingsDialog(vm: CameraViewModel, ui: UiState) {
                     vm.updateSettings { it.copy(colorProfile = c) }
                 }
                 InfoText(
-                    "A fixed contrast curve applied by the camera's own tone-mapping hardware (no AI). " +
-                        "Natural is the camera's untouched output.",
+                    "A fixed contrast and colour look (no AI), the same on the preview and the photo. " +
+                        "Natural saves the camera's JPEG untouched.",
                 )
                 ChoiceRow("Photo format", PhotoFormat.entries.toList(), s.photoFormat, { it.label }) { f ->
                     vm.updateSettings(reopenCamera = true) { it.copy(photoFormat = f) }
@@ -436,9 +445,6 @@ fun SettingsDialog(vm: CameraViewModel, ui: UiState) {
                 }
                 SwitchRow("Mirror front-camera photos", s.mirrorFront) { vm.updateSettings { it.copy(mirrorFront = !it.mirrorFront) } }
                 SwitchRow("Live Photo: also save separate MP4", s.liveSaveVideo) { vm.updateSettings { it.copy(liveSaveVideo = !it.liveSaveVideo) } }
-                SwitchRow("Shutter sound", s.shutterSound, subtitle = "Some regions always require it") {
-                    vm.updateSettings { it.copy(shutterSound = !it.shutterSound) }
-                }
                 SwitchRow("Save location", s.geotag, subtitle = "Adds GPS coordinates to photos and videos") {
                     when {
                         s.geotag -> vm.setGeotag(false)

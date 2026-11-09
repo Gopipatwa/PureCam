@@ -41,6 +41,11 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        vm.onUserInteraction()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (vm.onKeyDown(keyCode, event.repeatCount)) return true
         return super.onKeyDown(keyCode, event)

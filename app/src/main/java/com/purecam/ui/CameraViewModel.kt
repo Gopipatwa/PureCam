@@ -44,6 +44,7 @@ import com.purecam.media.LiveClip
 import com.purecam.media.LivePhotoRecorder
 import com.purecam.media.MediaStoreSaver
 import com.purecam.media.MotionPhoto
+import com.purecam.media.NightStack
 import com.purecam.media.VideoRecorder
 import com.purecam.model.AppSettings
 import com.purecam.model.AspectRatio
@@ -121,8 +122,12 @@ data class UiState(
     val screenFlash: Boolean = false,
     val recordingPaused: Boolean = false,
     val showZoomSlider: Boolean = false,
-    /** Display rotation in quarter turns (landscape layouts). */
+    /** Display rotation in quarter turns (always 0: the UI is portrait-only). */
     val displayRotation: Int = 0,
+    /** Night shot in progress: 0..0.5 capturing (hold still), 0.5..1 merging. */
+    val nightProgress: Float? = null,
+    /** Camera closed after a while without touches, to save battery and heat. */
+    val standby: Boolean = false,
     val slowMoOptions: Map<Int, Size> = emptyMap(),
     /** > 0 while the camera runs a slow-motion (high-speed) session. */
     val activeHighSpeedFps: Int = 0,
@@ -174,6 +179,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private var pausedAt = 0L
     private var heicLimitShown = false
     private var brightnessJob: Job? = null
+    private var idleJob: Job? = null
+    private var lastInteraction = 0L
 
     init {
         sound.load(MediaActionSound.SHUTTER_CLICK)
@@ -220,13 +227,50 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onResume() {
         resumed = true
+        lastInteraction = SystemClock.elapsedRealtime()
+        _ui.update { it.copy(standby = false) }
         viewModelScope.launch(Dispatchers.IO) { loadLatestThumbnail() }
         orientation.start()
         if (_ui.value.settings.geotag) location.start()
         reopen()
+        idleJob?.cancel()
+        idleJob = viewModelScope.launch {
+            while (isActive) {
+                delay(10_000)
+                val st = _ui.value
+                val idle = SystemClock.elapsedRealtime() - lastInteraction > IDLE_STANDBY_MS
+                if (idle && resumed && !st.standby && !st.recording && st.nightProgress == null && st.saving == 0 &&
+                    st.countdown == null && !burstActive && !st.showSettings
+                ) {
+                    enterStandby()
+                }
+            }
+        }
+    }
+
+    /** Any touch or key press (from the activity). Wakes the camera from standby. */
+    fun onUserInteraction() {
+        lastInteraction = SystemClock.elapsedRealtime()
+        if (_ui.value.standby) {
+            _ui.update { it.copy(standby = false) }
+            reopen()
+        }
+    }
+
+    private fun enterStandby() {
+        _ui.update { it.copy(standby = true, focusPoint = null, showBrightness = false) }
+        viewModelScope.launch {
+            sessionMutex.withLock {
+                if (!_ui.value.standby) return@withLock
+                stopLive()
+                controller.close()
+                _ui.update { it.copy(cameraReady = false) }
+            }
+        }
     }
 
     fun onPause() {
+        idleJob?.cancel()
         resumed = false
         orientation.stop()
         location.stop()
@@ -257,7 +301,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private fun reopen() {
         viewModelScope.launch {
             sessionMutex.withLock {
-                if (resumed && permission) openCamera()
+                if (resumed && permission && !_ui.value.standby) openCamera()
             }
         }
     }
@@ -348,9 +392,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             val photo = effectivePhoto(st)
             val aspect = photo?.size?.let { it.width.toFloat() / it.height } ?: (4f / 3f)
             val preview = StreamSpecs.previewSize(lens, aspect)
-            val raw = if (s.raw && st.caps.raw && photo?.maxRes != true) StreamSpecs.rawSize(lens) else null
+            val night = st.mode == CameraMode.NIGHT
+            val raw = if (s.raw && st.caps.raw && photo?.maxRes != true && !night) StreamSpecs.rawSize(lens) else null
             val liveOn = st.mode == CameraMode.PHOTO && s.live
-            val heic = s.photoFormat == PhotoFormat.HEIC && !liveOn && StreamSpecs.supportsHeic(lens, photo)
+            val heic = s.photoFormat == PhotoFormat.HEIC && !liveOn && !night && StreamSpecs.supportsHeic(lens, photo)
             SessionSpec(
                 st.mode, preview, photo, st.photoOptions.firstOrNull { !it.maxRes }, raw, StreamSpecs.fpsRange(lens, 30, false),
                 stillFormat = if (heic) ImageFormat.HEIC else ImageFormat.JPEG,
@@ -363,7 +408,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
      * phones' Live/Motion photos); otherwise the user's chosen size (50/200 MP stays for normal shots).
      */
     fun effectivePhoto(st: UiState): PhotoSizeOption? {
-        if (st.mode == CameraMode.PHOTO && st.settings.live) {
+        if ((st.mode == CameraMode.PHOTO && st.settings.live) || st.mode == CameraMode.NIGHT) {
             val normal = st.photoOptions.filter { !it.maxRes }
             return normal.filter { it.megapixels <= LIVE_MAX_MP }.maxByOrNull { it.megapixels }
                 ?: normal.minByOrNull { it.megapixels }
@@ -410,6 +455,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         }
         val flash = when {
             st.mode == CameraMode.VIDEO -> if (st.settings.flash == FlashMode.TORCH) FlashMode.TORCH else FlashMode.OFF
+            st.mode == CameraMode.NIGHT -> FlashMode.OFF
             else -> st.settings.flash
         }
         return ControlState(
@@ -429,7 +475,6 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             noiseReduction = st.settings.noiseReduction,
             sharpening = st.settings.sharpening,
             stabilization = st.settings.stabilization,
-            toneCurve = if (st.caps.toneCurve) st.settings.colorProfile.curve else 0f,
         )
     }
 
@@ -441,21 +486,13 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         else -> PointF(x, y)
     }
 
-    /** Called by the UI when the activity's display rotation changes (landscape layout). */
-    fun setDisplayRotation(quarter: Int) {
-        if (_ui.value.displayRotation == quarter) return
-        renderer.displayRotation = quarter
-        _ui.update { it.copy(displayRotation = quarter, focusPoint = null, aeAfLocked = false) }
-        pushControls()
-    }
-
     private fun pushControls(refocus: Boolean = false) {
         controller.update(controlState(_ui.value), refocus)
         syncRenderer()
     }
 
-    /** Lenses without tone-curve support get the colour profile from the GPU instead. */
-    private fun profileViaGl(st: UiState) = st.settings.colorProfile != ColorProfile.NATURAL && !st.caps.toneCurve
+    /** The colour profile is drawn by the GPU (preview and saved photo); Natural leaves the camera's JPEG untouched. */
+    private fun profileViaGl(st: UiState) = st.settings.colorProfile != ColorProfile.NATURAL
 
     private fun syncRenderer() {
         val st = _ui.value
@@ -467,7 +504,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         // The preview (and video / Live clips, which share it) always get the profile from the GPU;
         // saturation only when photos get it from the GPU too, so preview and photo match.
         val viaGl = profileViaGl(st)
-        renderer.baseCurve = st.settings.colorProfile.curve
+        renderer.baseCurve = if (viaGl) st.settings.colorProfile.curve else 0f
         renderer.baseSat = if (viaGl) st.settings.colorProfile.saturation else 1f
     }
 
@@ -526,7 +563,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         countdownJob?.cancel()
         _ui.update { it.copy(mode = m, focusPoint = null, aeAfLocked = false, proControl = null, countdown = null) }
         val liveSizeChanges = st.settings.live && (st.mode == CameraMode.PHOTO || m == CameraMode.PHOTO)
-        if (st.mode == CameraMode.VIDEO || m == CameraMode.VIDEO || liveSizeChanges) reopen() else {
+        val nightChanges = st.mode == CameraMode.NIGHT || m == CameraMode.NIGHT
+        if (st.mode == CameraMode.VIDEO || m == CameraMode.VIDEO || liveSizeChanges || nightChanges) reopen() else {
             pushControls()
             updateLive()
         }
@@ -868,6 +906,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     fun onShutterTap() {
         val st = _ui.value
         if (!st.cameraReady && !st.recording) return
+        if (st.nightProgress != null) return
         when {
             st.mode == CameraMode.VIDEO -> toggleRecording()
             countdownJob?.isActive == true -> {
@@ -890,7 +929,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onShutterLongPress() {
         val st = _ui.value
-        if (st.mode == CameraMode.VIDEO || !st.cameraReady || burstActive) return
+        if (st.mode == CameraMode.VIDEO || st.mode == CameraMode.NIGHT || !st.cameraReady || burstActive) return
         burstActive = true
         burstJob = viewModelScope.launch {
             var n = 0
@@ -909,12 +948,15 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         burstActive = false
     }
 
-    private fun shouldPlaySound(): Boolean =
-        _ui.value.settings.shutterSound || (Build.VERSION.SDK_INT >= 33 && MediaActionSound.mustPlayShutterSound())
+    /** Some regions (e.g. Japan, Korea) require the click; the system tells apps via this flag. */
+    val shutterSoundForced: Boolean = Build.VERSION.SDK_INT >= 33 && MediaActionSound.mustPlayShutterSound()
+
+    private fun shouldPlaySound(): Boolean = _ui.value.settings.shutterSound || shutterSoundForced
 
     /** Returns false if the capture failed. */
     private suspend fun takePicture(burst: Boolean): Boolean {
         val st = _ui.value
+        if (st.mode == CameraMode.NIGHT) return takeNight()
         val lens = st.lens ?: return false
         val rot = orientation.rotation.value
         val jpegOrientation = Orientations.jpeg(lens.sensorOrientation, rot, lens.isFront)
@@ -953,6 +995,43 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    /** Night: a burst of frames, aligned and averaged on the phone (see [NightStack]). */
+    private suspend fun takeNight(): Boolean {
+        val st = _ui.value
+        val lens = st.lens ?: return false
+        if (st.nightProgress != null) return false
+        val rot = orientation.rotation.value
+        val jpegOrientation = Orientations.jpeg(lens.sensorOrientation, rot, lens.isFront)
+        _ui.update { it.copy(nightProgress = 0f) }
+        val frames = try {
+            controller.captureNight(jpegOrientation, currentLocation(st)) { done, total ->
+                _ui.update { it.copy(nightProgress = 0.5f * done / total) }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "night capture", e)
+            showMessage("Night capture failed: ${e.message}")
+            _ui.update { it.copy(nightProgress = null) }
+            return false
+        }
+        _ui.update { it.copy(nightProgress = 0.5f, saving = it.saving + 1) }
+        val cache = getApplication<Application>().cacheDir
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val merged = NightStack.merge(frames.jpegs, st.settings.jpegQuality, cache) { p ->
+                    _ui.update { it.copy(nightProgress = 0.5f + 0.5f * p) }
+                }
+                val shot = StillShot(merged, null, null, frames.chars, frames.jpegOrientation)
+                savePhoto(shot, st, lens, Filters.byId(st.settings.filterId), null)
+            } catch (e: Throwable) {
+                Log.e(TAG, "night save", e)
+                showMessage("Night photo failed: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                _ui.update { it.copy(saving = it.saving - 1, nightProgress = null) }
+            }
+        }
+        return true
+    }
+
     private suspend fun savePhoto(shot: StillShot, st: UiState, lens: Lens, filter: Filter, liveDeferred: Deferred<LiveClip?>?) {
         val resolver = getApplication<Application>().contentResolver
         val s = st.settings
@@ -965,8 +1044,12 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         var jpeg = shot.jpeg
         var isHeic = shot.heic
 
-        val viaGl = profileViaGl(st)
-        if (filtered || crop != null || mirror || viaGl) {
+        // The GPU path works up to ~16.8 MP; a 50/200 MP photo that only needs the colour profile is kept
+        // at full resolution, untouched, instead of being scaled down.
+        val needsGpu = filtered || crop != null || mirror
+        val pixels = effectivePhoto(st)?.size?.let { it.width.toLong() * it.height } ?: 0L
+        val viaGl = profileViaGl(st) && (needsGpu || pixels <= PhotoProcessor.MAX_PIXELS)
+        if (needsGpu || viaGl) {
             if (filtered && s.keepOriginal) {
                 // The extra unfiltered copy uses the same format as the main photo.
                 var orig = shot.jpeg
@@ -1295,6 +1378,8 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         private const val MAX_BURST = 50
         private const val SCREEN_FLASH_SETTLE_MS = 650L
         private const val BRIGHTNESS_HIDE_MS = 2200L
+        /** Close the camera after this long without a touch (like the stock camera) to stop heating. */
+        private const val IDLE_STANDBY_MS = 120_000L
         private const val LIVE_MAX_SIDE = 1440
         private const val LIVE_BITRATE_HEVC = 4_000_000
         private const val LIVE_BITRATE_AVC = 6_000_000

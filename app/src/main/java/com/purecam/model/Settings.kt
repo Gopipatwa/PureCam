@@ -4,7 +4,7 @@ import android.content.Context
 import android.hardware.camera2.CameraMetadata
 import android.media.MediaFormat
 
-enum class CameraMode(val label: String) { PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO") }
+enum class CameraMode(val label: String) { NIGHT("NIGHT"), PHOTO("PHOTO"), PRO("PRO"), VIDEO("VIDEO") }
 
 enum class AspectRatio(val label: String, val long: Int, val short: Int) {
     R4_3("4:3", 4, 3),
@@ -23,7 +23,7 @@ enum class GridType(val label: String) {
 
 /** How much of the camera's own (non-AI, classic ISP) noise reduction / sharpening is applied. */
 enum class Processing(val label: String) {
-    OFF("Off (pure sensor)"), MINIMAL("Minimal"), FAST("Fast"), HIGH_QUALITY("High quality")
+    OFF("Off (pure sensor, noisy)"), MINIMAL("Minimal"), FAST("Fast"), HIGH_QUALITY("High quality (camera default)")
 }
 
 enum class VideoResolution(val label: String, val width: Int, val height: Int) {
@@ -36,8 +36,8 @@ enum class VideoCodec(val label: String, val mime: String) {
 }
 
 /**
- * Deterministic tone curve on top of the camera's output (no AI): the camera's own tonemap hardware
- * applies it, so it costs nothing and photos stay the camera's original JPEG.
+ * Fixed contrast / saturation look (no AI) drawn by the GPU on the preview and on the saved photo.
+ * The camera itself always uses its own high-quality tone mapping.
  */
 enum class ColorProfile(val label: String, val curve: Float, val saturation: Float) {
     NATURAL("Natural (untouched)", 0f, 1f),
@@ -71,8 +71,8 @@ data class AppSettings(
     val live: Boolean = false,
     val raw: Boolean = false,
     val jpegQuality: Int = 100,
-    val noiseReduction: Processing = Processing.OFF,
-    val sharpening: Processing = Processing.OFF,
+    val noiseReduction: Processing = Processing.HIGH_QUALITY,
+    val sharpening: Processing = Processing.HIGH_QUALITY,
     val keepOriginal: Boolean = false,
     val mirrorFront: Boolean = false,
     val liveSaveVideo: Boolean = false,
@@ -111,8 +111,8 @@ class SettingsStore(context: Context) {
             live = p.getBoolean("live", d.live),
             raw = p.getBoolean("raw", d.raw),
             jpegQuality = p.getInt("jpegQuality", d.jpegQuality),
-            noiseReduction = enumOr(p.getString("nr", null), d.noiseReduction),
-            sharpening = enumOr(p.getString("edge", null), d.sharpening),
+            noiseReduction = enumOr(p.getString("nrV2", null), d.noiseReduction),
+            sharpening = enumOr(p.getString("edgeV2", null), d.sharpening),
             keepOriginal = p.getBoolean("keepOriginalV2", d.keepOriginal),
             mirrorFront = p.getBoolean("mirrorFront", d.mirrorFront),
             liveSaveVideo = p.getBoolean("liveSaveVideo", d.liveSaveVideo),
@@ -147,8 +147,8 @@ class SettingsStore(context: Context) {
             .putBoolean("live", s.live)
             .putBoolean("raw", s.raw)
             .putInt("jpegQuality", s.jpegQuality)
-            .putString("nr", s.noiseReduction.name)
-            .putString("edge", s.sharpening.name)
+            .putString("nrV2", s.noiseReduction.name)
+            .putString("edgeV2", s.sharpening.name)
             .putBoolean("keepOriginalV2", s.keepOriginal)
             .putBoolean("mirrorFront", s.mirrorFront)
             .putBoolean("liveSaveVideo", s.liveSaveVideo)

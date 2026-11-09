@@ -118,7 +118,7 @@ object StreamSpecs {
             .take(10)
     }
 
-    fun previewSize(lens: Lens, aspect: Float, maxW: Int = 1440, maxH: Int = 1440): Size {
+    fun previewSize(lens: Lens, aspect: Float, maxW: Int = 1920, maxH: Int = 1440): Size {
         val sizes = map(lens)?.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
         return sizes.filter { it.width <= maxW && it.height <= maxH && matches(it, aspect) }.maxByOrNull { area(it) }
             ?: sizes.filter { it.width <= maxW && it.height <= maxH }

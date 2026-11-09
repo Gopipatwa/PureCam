@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraMetadata
-import android.hardware.display.DisplayManager
 import android.view.HapticFeedbackConstants
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -41,23 +40,16 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -76,6 +68,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoFilter
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Timer10
 import androidx.compose.material.icons.filled.Timer3
@@ -195,42 +188,18 @@ private fun View.haptic(type: Int) {
     performHapticFeedback(type)
 }
 
-/** Display rotation in quarter turns, tracked with a DisplayListener (90°↔270° flips fire no config change). */
-@Composable
-private fun rememberDisplayQuarter(): Int {
-    val view = LocalView.current
-    val ctx = LocalContext.current
-    var q by remember { mutableIntStateOf(view.display?.rotation ?: 0) }
-    DisposableEffect(view) {
-        val dm = ctx.getSystemService(DisplayManager::class.java)
-        val listener = object : DisplayManager.DisplayListener {
-            override fun onDisplayAdded(displayId: Int) = Unit
-            override fun onDisplayRemoved(displayId: Int) = Unit
-            override fun onDisplayChanged(displayId: Int) {
-                view.display?.rotation?.let { q = it }
-            }
-        }
-        dm?.registerDisplayListener(listener, view.handler)
-        view.display?.rotation?.let { q = it }
-        onDispose { dm?.unregisterDisplayListener(listener) }
-    }
-    return q
-}
-
 @Composable
 fun CameraScreen(vm: CameraViewModel) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val hold by vm.orientation.rotation.collectAsStateWithLifecycle()
-    val quarter = rememberDisplayQuarter()
-    val landscape = quarter % 2 == 1
-    // icons stay upright relative to how the phone is held, accounting for the display's own rotation
-    val rot = rememberIconRotation((hold + 90 * quarter) % 360)
+    // The screen stays in portrait like the stock camera; only the icons turn to follow how the phone is held.
+    val quarter = 0
+    val rot = rememberIconRotation(hold)
     val s = ui.settings
     val snackbar = remember { SnackbarHostState() }
     val view = LocalView.current
     val ctx = LocalContext.current
 
-    LaunchedEffect(quarter) { vm.setDisplayRotation(quarter) }
     LaunchedEffect(Unit) { vm.haptics.collect { view.haptic(it) } }
     LaunchedEffect(ui.messageId) {
         val msg = ui.message ?: return@LaunchedEffect
@@ -278,13 +247,7 @@ fun CameraScreen(vm: CameraViewModel) {
         }
         // Viewfinder: always centred.
         Box(
-            (
-                if (landscape) {
-                    Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(1f / portraitAspect)
-                } else {
-                    Modifier.align(Alignment.Center).fillMaxWidth().aspectRatio(portraitAspect)
-                }
-                ).onGloballyPositioned { c ->
+            Modifier.align(Alignment.Center).fillMaxWidth().aspectRatio(portraitAspect).onGloballyPositioned { c ->
                 val o = c.positionInWindow()
                 vm.renderer.setViewport(
                     (o.x - surfaceOrigin[0]).roundToInt(),
@@ -299,15 +262,12 @@ fun CameraScreen(vm: CameraViewModel) {
             if (switchingDim > 0.01f) Box(Modifier.fillMaxSize().background(CamColors.Scrim.copy(alpha = switchingDim)))
         }
 
-        if (landscape) {
-            LandscapeChrome(vm, ui, rot)
-        } else {
-            PortraitChrome(vm, ui, rot)
-        }
+        PortraitChrome(vm, ui, rot)
 
         SnackbarHost(snackbar, Modifier.align(Alignment.Center).padding(16.dp))
 
         if (ui.screenFlash) Box(Modifier.fillMaxSize().background(Color.White))
+        if (ui.standby) StandbyOverlay()
         if (ui.showSettings) SettingsDialog(vm, ui)
     }
 }
@@ -361,6 +321,7 @@ private fun Viewfinder(vm: CameraViewModel, ui: UiState, rot: Float, quarter: In
             if (s.live && ui.mode == CameraMode.PHOTO) StatusBadge("LIVE", CamColors.Accent)
             if (ui.maxResActive && ui.mode != CameraMode.VIDEO) StatusBadge("FULL SENSOR", CamColors.OnScrim)
         }
+        ui.nightProgress?.let { p -> NightOverlay(p, rot) }
         ui.countdown?.let {
             Text(
                 "$it",
@@ -370,6 +331,51 @@ private fun Viewfinder(vm: CameraViewModel, ui: UiState, rot: Float, quarter: In
                 fontWeight = FontWeight.Light,
             )
         }
+    }
+}
+
+/** Camera closed to save battery; the screen may now turn off by itself. Any tap wakes it (via the activity). */
+@Composable
+private fun StandbyOverlay() {
+    val ctx = LocalContext.current
+    DisposableEffect(Unit) {
+        val w = ctx.findActivity()?.window
+        w?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose { w?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(CamColors.Scrim.copy(alpha = 0.85f))
+            .pointerInput(Unit) { detectTapGestures { } },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Filled.PhotoCamera, null, Modifier.size(48.dp), tint = CamColors.OnScrim)
+            Text("Camera paused to save battery", Modifier.padding(top = 12.dp), color = CamColors.OnScrim, style = MaterialTheme.typography.titleMedium)
+            Text("Tap anywhere to continue", Modifier.padding(top = 4.dp), color = CamColors.OnScrim.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.NightOverlay(progress: Float, rot: Float) {
+    val anim by animateFloatAsState(progress, tween(250), label = "nightProgress")
+    Column(
+        Modifier
+            .align(Alignment.Center)
+            .graphicsLayer { rotationZ = rot }
+            .background(CamColors.Scrim.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 24.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CircularProgressIndicator(progress = { anim }, Modifier.size(56.dp), color = MaterialTheme.colorScheme.primary)
+        Text(
+            if (progress < 0.5f) "Hold still" else "Processing night shot",
+            Modifier.padding(top = 10.dp),
+            color = CamColors.OnScrim,
+            style = MaterialTheme.typography.labelLarge,
+        )
     }
 }
 
@@ -420,69 +426,6 @@ private fun androidx.compose.foundation.layout.BoxScope.PortraitChrome(vm: Camer
             ShutterButton(vm, ui)
             ShutterSideEnd(vm, ui, rot)
         }
-    }
-}
-
-@Composable
-private fun androidx.compose.foundation.layout.BoxScope.LandscapeChrome(vm: CameraViewModel, ui: UiState, rot: Float) {
-    // Left rail: quick toggles.
-    Column(
-        Modifier
-            .align(Alignment.CenterStart)
-            .fillMaxHeight()
-            .background(Brush.horizontalGradient(listOf(CamColors.Scrim.copy(alpha = 0.7f), Color.Transparent)))
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical))
-            .padding(horizontal = 4.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.SpaceEvenly,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        TopBarItems(vm, ui, rot)
-    }
-    // Right rail: lenses, modes and the shutter column.
-    Row(
-        Modifier
-            .align(Alignment.CenterEnd)
-            .fillMaxHeight()
-            .background(Brush.horizontalGradient(listOf(Color.Transparent, CamColors.Scrim.copy(alpha = 0.7f))))
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.End + WindowInsetsSides.Vertical))
-            .padding(end = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            LensChips(vm, ui, rot, vertical = true)
-        }
-        Column(
-            Modifier.padding(horizontal = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            if (ui.mode == CameraMode.VIDEO && !ui.recording) VideoKindChips(vm, ui, vertical = true)
-            ModeSelector(vm, ui, vertical = true)
-        }
-        Column(
-            Modifier.fillMaxHeight().padding(vertical = 16.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            ShutterSideEnd(vm, ui, rot)
-            ShutterButton(vm, ui)
-            ShutterSideStart(vm, ui, rot)
-        }
-    }
-    // Panels float at the bottom centre, over the image.
-    Column(
-        Modifier
-            .align(Alignment.BottomCenter)
-            .widthIn(max = 560.dp)
-            .fillMaxWidth(0.62f)
-            .navigationBarsPadding()
-            .padding(bottom = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        AnimatedVisibility(ui.showZoomSlider, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-            ZoomSlider(vm, ui, Modifier.fillMaxWidth())
-        }
-        PanelArea(vm, ui, Modifier.fillMaxWidth())
     }
 }
 
@@ -782,7 +725,7 @@ private fun TopBarItems(vm: CameraViewModel, ui: UiState, rot: Float) {
         BarIcon(Icons.Filled.Brightness6, "Brightness", rot, active = ui.showBrightness || ui.ev != 0) { vm.toggleBrightness() }
     }
     when (ui.mode) {
-        CameraMode.PHOTO, CameraMode.PRO -> {
+        CameraMode.NIGHT, CameraMode.PHOTO, CameraMode.PRO -> {
             val timerIcon = when (s.timerSec) {
                 0 -> Icons.Filled.TimerOff
                 3 -> Icons.Filled.Timer3
@@ -796,7 +739,7 @@ private fun TopBarItems(vm: CameraViewModel, ui: UiState, rot: Float) {
                 }
             }
             BarText(s.aspect.label, rot) { vm.cycleAspect() }
-            if (ui.caps.raw) BarText("RAW", rot, active = s.raw) { vm.toggleRaw() }
+            if (ui.caps.raw && ui.mode != CameraMode.NIGHT) BarText("RAW", rot, active = s.raw) { vm.toggleRaw() }
         }
 
         CameraMode.VIDEO -> when (s.videoKind) {
@@ -1179,7 +1122,12 @@ private fun ShutterButton(vm: CameraViewModel, ui: UiState) {
                     .fillMaxSize()
                     .graphicsLayer { scaleX = innerScale; scaleY = innerScale }
                     .background(photoFill, CircleShape),
-            )
+                contentAlignment = Alignment.Center,
+            ) {
+                if (ui.mode == CameraMode.NIGHT) {
+                    Icon(Icons.Filled.NightsStay, "Night", Modifier.size(30.dp), tint = CamColors.Scrim.copy(alpha = 0.75f))
+                }
+            }
         }
     }
 }

@@ -138,6 +138,6 @@ class PhotoProcessor(private val cacheDir: File) {
 
     companion object {
         /** Cap the processing size (≈ 16.8 MP) so filtered 50/200 MP shots don't exhaust memory. */
-        private const val MAX_PIXELS = 4096L * 4096L
+        const val MAX_PIXELS = 4096L * 4096L
     }
 }

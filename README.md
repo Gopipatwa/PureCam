@@ -6,8 +6,9 @@ A no-AI camera app for Android, tuned for the **Redmi Note 13 Pro+** (200 MP HP3
 
 PureCam talks to the sensor only through the standard **Camera2** API:
 
-- no scene detection, beautification, sky or face enhancement, multi-frame HDR/night merging or AI super-resolution;
-- **noise reduction and sharpening default to OFF**, and you choose how much in Settings (Off / Minimal / Fast / High quality);
+- no scene detection, beautification, sky or face enhancement, HDR or AI super-resolution;
+- Night mode only averages aligned frames (plain maths, no AI);
+- noise reduction and sharpening use the camera's own classic ISP at **High quality** by default (the same as its standard photo template); you can lower them or turn them off in Settings;
 - photos without a filter are saved as **the exact JPEG bytes the camera produced**, untouched;
 - **RAW (DNG)** saves the unprocessed Bayer data;
 - **Full-sensor mode**: if the HAL exposes the 200 MP mode to apps (Android 12+ `ULTRA_HIGH_RESOLUTION_SENSOR`), it appears in Settings → Resolution as "(full sensor)".
@@ -17,7 +18,8 @@ PureCam talks to the sensor only through the standard **Camera2** API:
 | Area | What you get |
 |---|---|
 | Lenses | Every camera the system exposes, **including hidden IDs** (probes IDs 0–63, a common Xiaomi/MediaTek trick) and the physical sub-cameras of logical cameras. Shown as 0.6x / 1x / 2x / Macro / Front chips. Pinch to zoom. Settings shows each detected lens with its ID, focal length and MP. |
-| Modes | Photo, Pro, Video |
+| Modes | Night, Photo, Pro, Video |
+| Night | Takes a burst of 5–8 frames (longer exposure, lower ISO with manual sensor control), aligns them and averages them; pixels that moved are left out so nothing ghosts. Hold still for about a second. |
 | Pro | Manual ISO, shutter (1/8000 s to 30 s, limited by the lens), manual focus with **focus peaking**, white balance presets plus Kelvin, EV, live **histogram**, and a one-tap reset to auto |
 | Photo | Tap to focus/meter, long-press for **AE/AF lock**, EV slider, flash (off/auto/on/torch), timer (3/5/10 s), **burst** (hold the shutter), aspect 4:3 / 16:9 / 1:1, resolution picker, JPEG quality, RAW+JPEG |
 | Live Photo | Tap the **LIVE** icon in Photo mode. Saves about 1.5 s before and 1.5 s after the shutter as a **Motion Photo** (`.MP.jpg`, Google Motion Photo v1 + MicroVideo XMP). It plays in Google Photos and Xiaomi Gallery, and you can also save the clip as a separate MP4. |
@@ -29,7 +31,7 @@ PureCam talks to the sensor only through the standard **Camera2** API:
 | File size | Live Photos use ~12 MP stills and a small HEVC clip (≤1440 px, ~4 Mbit/s). Optional **HEIC** photo format (camera-native when supported, otherwise hardware HEIF encoding up to ~50 MP); Live Photos stay JPEG Motion Photos |
 | Selfies | Screen flash for the front camera: white screen at full brightness |
 | Location | Optional GPS tagging of photos, RAW and videos (Settings → Save location) |
-| Layout | Real landscape layout when the phone is turned sideways; haptic feedback on the shutter, lens switches, mode changes and slider steps |
+| Layout | Portrait-only like the stock camera (icons turn with the phone); haptic feedback on the shutter, lens switches, mode changes and slider steps; the camera pauses after 2 minutes without a touch to save battery |
 | Viewfinder | Grid (thirds / golden / 4×4), level indicator, icons that rotate with the phone |
 | Controls | Volume keys as shutter or zoom, shutter sound toggle (forced where the law requires it), mirror front photos |
 

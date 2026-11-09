@@ -20,7 +20,6 @@ import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.RggbChannelVector
 import android.hardware.camera2.params.SessionConfiguration
-import android.hardware.camera2.params.TonemapCurve
 import android.location.Location
 import android.media.Image
 import android.media.ImageReader
@@ -77,11 +76,9 @@ data class ControlState(
     /** Fraction of the camera image visible in the viewfinder on each axis (centre crop). */
     val viewCropX: Float = 1f,
     val viewCropY: Float = 1f,
-    val noiseReduction: Processing = Processing.OFF,
-    val sharpening: Processing = Processing.OFF,
+    val noiseReduction: Processing = Processing.HIGH_QUALITY,
+    val sharpening: Processing = Processing.HIGH_QUALITY,
     val stabilization: Boolean = true,
-    /** S-curve strength for the colour profile (0 = camera default tonemap). */
-    val toneCurve: Float = 0f,
 )
 
 class SessionSpec(
@@ -99,6 +96,9 @@ class SessionSpec(
     /** ImageFormat.JPEG or ImageFormat.HEIC for the still stream. */
     val stillFormat: Int = ImageFormat.JPEG,
 )
+
+/** The frames of a night shot, in capture order. */
+class NightFrames(val jpegs: List<ByteArray>, val chars: CameraCharacteristics, val jpegOrientation: Int)
 
 class OpenResult(val warning: String?, val rawActive: Boolean, val maxResActive: Boolean, val heicActive: Boolean)
 
@@ -586,16 +586,11 @@ class CameraController(context: Context) {
         val edgeModes = ch.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: intArrayOf()
         pickEdge(c.sharpening, still, edgeModes)?.let { b.set(CaptureRequest.EDGE_MODE, it) }
 
-        // Colour profile: our S-curve on top of the sRGB gamma, applied by the ISP's tonemap block.
-        // Stills only: some HALs (MediaTek) apply a custom curve to the preview stream on top of the
-        // already gamma-encoded image, which looks washed out. The GL renderer draws the same curve
-        // onto the preview instead, so the viewfinder still matches the photo.
+        // Photos always use the camera's own high-quality tone mapping. (A custom contrast curve here
+        // replaced the sensor-tuned shadow roll-off and made photos noisy; the colour profile is now
+        // drawn by the GPU instead.)
         val tmModes = ch.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES) ?: intArrayOf()
-        if (still && c.toneCurve > 0f && tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)) {
-            val pts = ch.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 32
-            b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
-            b.set(CaptureRequest.TONEMAP_CURVE, toneCurve(c.toneCurve, minOf(pts, 64)))
-        } else if (still && tmModes.contains(CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)) {
+        if (still && tmModes.contains(CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)) {
             b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)
         }
 
@@ -727,6 +722,97 @@ class CameraController(context: Context) {
         }
     }
 
+    /**
+     * Night: a burst of identically exposed frames for [com.purecam.media.NightStack] to average.
+     * With manual sensor control each frame gets a longer exposure (up to 1/8 s, OIS keeps it sharp)
+     * at a lower ISO than the preview uses, and a bit more light in dark scenes.
+     */
+    suspend fun captureNight(jpegOrientation: Int, location: Location?, onFrame: (done: Int, total: Int) -> Unit): NightFrames {
+        val shots = withContext(dispatcher) {
+            val s = session ?: throw CameraException("Camera not ready")
+            val dev = device ?: throw CameraException("Camera not ready")
+            val jr = jpegReader ?: throw CameraException("Photo output not configured")
+            if (heicActive) throw CameraException("Night needs the JPEG photo stream")
+            val lens = lens!!
+            val ch = lens.chars
+            val caps = ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            val manual = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+            val c = controls
+            val evStep = ch.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: (1f / 3f)
+            // Scene light as metered by the preview's auto exposure (ISO x nanoseconds).
+            val metered = autoIso.toDouble() * autoExposure * 2.0.pow((c.ev * evStep).toDouble())
+            val dark = metered >= 800.0 * 33_000_000.0 // ISO 800 at 1/30 s or darker
+            val frames = if (dark) NIGHT_FRAMES_DARK else NIGHT_FRAMES_DIM
+            val target = metered * (if (dark) 1.5 else 1.15)
+            val isoRange = ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            val expRange = ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            var iso = 0
+            var exp = 0L
+            if (manual && isoRange != null && expRange != null) {
+                val maxT = min(NIGHT_MAX_FRAME_NS, expRange.upper)
+                exp = max(autoExposure, (target / isoRange.lower).toLong()).coerceAtMost(maxT).coerceIn(expRange.lower, expRange.upper)
+                iso = (target / exp).toInt().coerceIn(isoRange.lower, isoRange.upper)
+            }
+            val requests = (0 until frames).map {
+                val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                b.addTarget(jr.surface)
+                if (!maxResActive) b.addTarget(previewSurface!!)
+                applyControls(b, still = true)
+                if (iso > 0) {
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                    b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                    b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
+                    b.set(CaptureRequest.SENSOR_FRAME_DURATION, exp)
+                } else {
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                    b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+                }
+                b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+                b.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                b.set(CaptureRequest.JPEG_QUALITY, 100.toByte())
+                location?.let { l -> b.set(CaptureRequest.JPEG_GPS_LOCATION, l) }
+                b.build()
+            }
+            val list = requests.map { PendingShot(false) }
+            list.forEach { pending.addLast(it) }
+            var completed = 0
+            s.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureStarted(session: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+                    if (request === requests[0]) listener?.onShutter()
+                }
+
+                override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    val i = requests.indexOf(request)
+                    if (i >= 0) list[i].result.complete(result)
+                    onFrame(++completed, frames)
+                }
+
+                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    val i = requests.indexOf(request)
+                    if (i >= 0) {
+                        pending.remove(list[i])
+                        list[i].fail(CameraException("Night frame failed (reason ${failure.reason})"))
+                    }
+                    onFrame(++completed, frames)
+                }
+            }, handler)
+            Triple(list, lens, frames)
+        }
+        val (list, lens, frames) = shots
+        val jpegs = ArrayList<ByteArray>()
+        withTimeoutOrNull(4_000L + frames * 1_500L) {
+            for (p in list) {
+                try {
+                    jpegs += p.jpeg.await()
+                } catch (_: CameraException) {
+                }
+            }
+        }
+        list.forEach { if (!it.jpeg.isCompleted) it.abandoned = true }
+        if (jpegs.isEmpty()) throw CameraException("Night capture failed")
+        return NightFrames(jpegs, lens.chars, jpegOrientation)
+    }
+
     private suspend fun runPrecapture(s: CameraCaptureSession, dev: CameraDevice) {
         val done = CompletableDeferred<Unit>()
         var started = false
@@ -788,6 +874,9 @@ class CameraController(context: Context) {
     companion object {
         private const val TAG = "CameraController"
         private const val PREVIEW_MAX_EXPOSURE_NS = 100_000_000L
+        private const val NIGHT_MAX_FRAME_NS = 125_000_000L
+        private const val NIGHT_FRAMES_DARK = 8
+        private const val NIGHT_FRAMES_DIM = 5
 
         /** Map a tap in portrait viewfinder space to normalised sensor coordinates. */
         fun viewToSensor(u: Float, v: Float, sensorOrientation: Int, front: Boolean): PointF {
@@ -798,23 +887,6 @@ class CameraController(context: Context) {
                 270 -> PointF(1f - v, x)
                 else -> PointF(x, v)
             }
-        }
-
-        private val curveCache = HashMap<Pair<Float, Int>, TonemapCurve>()
-
-        /** sRGB gamma followed by a smoothstep S-curve of [strength]; same curve for R, G and B. */
-        fun toneCurve(strength: Float, points: Int): TonemapCurve = curveCache.getOrPut(strength to points) {
-            val n = points.coerceIn(2, 64)
-            val a = FloatArray(n * 2)
-            for (i in 0 until n) {
-                val t = i / (n - 1f)
-                val x = t * t // denser points in the shadows
-                val g = if (x <= 0.0031308f) 12.92f * x else (1.055 * Math.pow(x.toDouble(), 1 / 2.4) - 0.055).toFloat()
-                val sc = g * g * (3 - 2 * g)
-                a[i * 2] = x
-                a[i * 2 + 1] = (g + strength * (sc - g)).coerceIn(0f, 1f)
-            }
-            TonemapCurve(a, a.copyOf(), a.copyOf())
         }
 
         /** Approximate white-balance gains that neutralise a black-body illuminant of [kelvin]. */
