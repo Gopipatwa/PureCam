@@ -464,8 +464,10 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         renderer.intensity = if (f.id == Filters.ORIGINAL) 0f else st.settings.filterIntensity
         renderer.peaking = st.mode == CameraMode.PRO && st.focus != null && st.settings.focusPeaking
         renderer.histogramEnabled = st.mode == CameraMode.PRO && st.settings.histogram
+        // The preview (and video / Live clips, which share it) always get the profile from the GPU;
+        // saturation only when photos get it from the GPU too, so preview and photo match.
         val viaGl = profileViaGl(st)
-        renderer.baseCurve = if (viaGl) st.settings.colorProfile.curve else 0f
+        renderer.baseCurve = st.settings.colorProfile.curve
         renderer.baseSat = if (viaGl) st.settings.colorProfile.saturation else 1f
     }
 

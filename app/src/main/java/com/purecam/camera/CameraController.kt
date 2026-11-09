@@ -587,8 +587,11 @@ class CameraController(context: Context) {
         pickEdge(c.sharpening, still, edgeModes)?.let { b.set(CaptureRequest.EDGE_MODE, it) }
 
         // Colour profile: our S-curve on top of the sRGB gamma, applied by the ISP's tonemap block.
+        // Stills only: some HALs (MediaTek) apply a custom curve to the preview stream on top of the
+        // already gamma-encoded image, which looks washed out. The GL renderer draws the same curve
+        // onto the preview instead, so the viewfinder still matches the photo.
         val tmModes = ch.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES) ?: intArrayOf()
-        if (c.toneCurve > 0f && tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)) {
+        if (still && c.toneCurve > 0f && tmModes.contains(CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)) {
             val pts = ch.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 32
             b.set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
             b.set(CaptureRequest.TONEMAP_CURVE, toneCurve(c.toneCurve, minOf(pts, 64)))
